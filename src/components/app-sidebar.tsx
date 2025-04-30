@@ -46,7 +46,7 @@ const data = {
       icon: LayoutDashboardIcon,
     },
     {
-      title: "Lifecycle",
+      title: "Correzione bozze",
       url: "#",
       icon: ListIcon,
     },
