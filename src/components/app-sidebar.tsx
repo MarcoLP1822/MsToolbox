@@ -47,7 +47,7 @@ const data = {
     },
     {
       title: "Correzione bozze",
-      url: "#",
+      url: "/correzione-bozze",
       icon: ListIcon,
     },
     {

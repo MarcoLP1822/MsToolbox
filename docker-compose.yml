@@ -1,0 +1,11 @@
+# docker-compose.yml
+services:
+  python:
+    build: ./python-service        # cartella che contiene il Dockerfile
+    ports:
+      - "8000:8000"                # esposto a http://localhost:8000
+    env_file:
+      - .env.local                 # contiene OPENAI_API_KEY=sk-...
+    # Aggiungi qui eventuali override:
+    # environment:
+    #   - OTHER_VAR=value

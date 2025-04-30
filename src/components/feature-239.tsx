@@ -107,12 +107,12 @@ type DottedDivProps = {
 const DottedDiv = ({ children, className }: DottedDivProps) => (
   <div className={cn("relative", className)}>
     {/* bordi orizzontali */}
-    <div className="absolute top-4 -left-25 h-[1.5px] w-[115%] bg-muted" />
-    <div className="absolute bottom-4 -left-25 h-[1.5px] w-[115%] bg-muted" />
+    <div className="absolute inset-x-4 top-4 h-px bg-muted" />
+    <div className="absolute inset-x-4 bottom-4 h-px bg-muted" />
 
     {/* bordi verticali */}
-    <div className="absolute -top-25 left-4 h-[130%] w-[1.5px] bg-muted" />
-    <div className="absolute -top-25 right-4 h-[130%] w-[1.5px] bg-muted" />
+    <div className="absolute top-4 bottom-4 left-4 w-px bg-muted" />
+    <div className="absolute top-4 bottom-4 right-4 w-px bg-muted" />
 
     {/* puntini agli angoli */}
     <div className="absolute top-[12.5px] left-[12.5px] z-10 size-2 rounded-full bg-foreground" />
