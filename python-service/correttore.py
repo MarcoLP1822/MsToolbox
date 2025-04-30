@@ -2,7 +2,7 @@
 """
 Corregge grammatica e ortografia in **qualsiasi** parte di un documento
 Word (.docx) e produce un report Markdown con tutte le modifiche.
-
+ssss
 * testo normale, anche in tabelle nidificate
 * header & footer
 * testo delle note a piè di pagina (footnotes)
@@ -39,6 +39,7 @@ if not OPENAI_API_KEY:
 
 OPENAI_MODEL = "gpt-4o-mini"
 MAX_TOKENS_GPT4O_MINI = 8_000
+
 # ─────────────────────────────────────────────────────────────────────
 
 WORD_RE = re.compile(r"\w+|\W+")
