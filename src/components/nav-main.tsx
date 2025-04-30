@@ -1,8 +1,9 @@
 // src/components/nav-main.tsx
 "use client"
 
-import Link from "next/link"           // ① importa Link
+import Link from "next/link"
 import { MailIcon, PlusCircleIcon, type LucideIcon } from "lucide-react"
+
 import { Button } from "@/components/ui/button"
 import {
   SidebarGroup,
@@ -20,13 +21,12 @@ export function NavMain({
   return (
     <SidebarGroup>
       <SidebarGroupContent className="flex flex-col gap-2">
-
-        {/* sezione “Quick Create” invariata */}
+        {/* blocco “Quick create” invariato */}
         <SidebarMenu>
           <SidebarMenuItem className="flex items-center gap-2">
             <SidebarMenuButton
               tooltip="Quick Create"
-              className="min-w-8 bg-primary text-primary-foreground hover:bg-primary/90"
+              className="min-w-8 bg-primary text-primary-foreground duration-200 ease-linear hover:bg-primary/90"
             >
               <PlusCircleIcon />
               <span>Quick Create</span>
@@ -38,13 +38,13 @@ export function NavMain({
           </SidebarMenuItem>
         </SidebarMenu>
 
-        {/* voci di navigazione vere e proprie */}
+        {/* voci di menu reali */}
         <SidebarMenu>
           {items.map((item) => (
             <SidebarMenuItem key={item.title}>
-              {/* ② asChild + Link abilita la navigazione client-side */}
-              <SidebarMenuButton asChild tooltip={item.title}>
-                <Link href={item.url} className="flex w-full items-center gap-2">
+              <SidebarMenuButton tooltip={item.title} asChild>
+                {/* ⬇️ Link di Next: mantiene SPA navigation */}
+                <Link href={item.url}>
                   {item.icon && <item.icon />}
                   <span>{item.title}</span>
                 </Link>
@@ -52,7 +52,6 @@ export function NavMain({
             </SidebarMenuItem>
           ))}
         </SidebarMenu>
-
       </SidebarGroupContent>
     </SidebarGroup>
   )

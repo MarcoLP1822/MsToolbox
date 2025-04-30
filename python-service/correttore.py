@@ -2,7 +2,7 @@
 """
 Corregge grammatica e ortografia in **qualsiasi** parte di un documento
 Word (.docx) e produce un report Markdown con tutte le modifiche.
-ssss
+
 * testo normale, anche in tabelle nidificate
 * header & footer
 * testo delle note a piè di pagina (footnotes)
