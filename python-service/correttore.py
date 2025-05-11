@@ -1,7 +1,5 @@
-# correttore.py
 """
-Corregge grammatica e ortografia in **qualsiasi** parte di un documento
-Word (.docx) e produce un report Markdown con tutte le modifiche.
+Corregge grammatica e ortografia in **qualsiasi** parte di un documento word (.docx) e produce un report Markdown con tutte le modifiche.
 
 * testo normale, anche in tabelle nidificate
 * header & footer
@@ -13,112 +11,117 @@ Richiede **python-docx ≥ 0.8.11**.
 """
 
 from __future__ import annotations
+
 import os
 import re
 import time
-from collections import defaultdict
-from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime
-from difflib import SequenceMatcher
+import json
+import shutil
+import asyncio
+import zipfile
+import tiktoken
+import collections
+import tempfile, uuid
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
-
+from copy import deepcopy
 from docx import Document
 from docx.oxml.ns import qn
+from datetime import datetime
+from dataclasses import dataclass
+from difflib import SequenceMatcher
+from collections import defaultdict
 from docx.text.paragraph import Paragraph
 from openai import OpenAI
+from openai import AsyncOpenAI
+from typing import Dict, Iterable, List, Optional, Tuple
+from reports import write_markdown_report, write_glossary_report
+from utils_openai import _OPENAI_MODEL as OPENAI_MODEL
+from utils_openai import get_corrections_async, get_corrections_sync
 
 # ───────────────────────── CONFIGURAZIONE ────────────────────────────
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError(
-        "OPENAI_API_KEY non trovata nelle variabili d’ambiente "
-        "(esporta la chiave o aggiungila nel file .env)"
-    )
+OPENAI_API_KEY = "***REMOVED***"
+# Lunghezza massima di contesto (in token) accettata in un singolo prompt
+MAX_TOKENS_GPT4O_MINI = 10000
 
-OPENAI_MODEL = "gpt-4o-mini"
-MAX_TOKENS_GPT4O_MINI = 8_000
-
+try:
+    ENC = tiktoken.encoding_for_model(OPENAI_MODEL)
+except KeyError:
+    # fallback universale, compatibile con GPT-4/3.5
+    ENC = tiktoken.get_encoding("cl100k_base")
 # ─────────────────────────────────────────────────────────────────────
 
 WORD_RE = re.compile(r"\w+|\W+")
+# 👇 NUOVO: riconosce parole in PascalCase o TUTTO MAIUSCOLO ≥ 3 lettere
+NAME_RE = re.compile(r"\b(?:[A-Z][a-z]{2,}|[A-Z]{2,})\w*\b")
 
 # ╭─────────────────────────── Note a piè di pagina ▾──────────────────────────╮
-import os, shutil, zipfile, tempfile
 from pathlib import Path
 from collections import defaultdict
 from copy import deepcopy
+import json, os, shutil, zipfile
 from lxml import etree
-from docx.oxml.ns import qn  # già presente nel file principale
+from docx.oxml.ns import qn
 
-def correggi_footnotes_xml(docx_path: Path, client) -> None:
-    """
-    Corregge il testo delle note a piè di pagina in word/footnotes.xml
-    distribuendo le parole corrette nei <w:t> originali (token-level) e
-    ripristinando il grassetto/italico del primo run se viene perso.
-    """
-    # cartella di lavoro sicura e sempre scrivibile
-    tmp_dir = tempfile.mkdtemp(prefix="footnotes_", dir="/tmp")
+# nuova importazione della utility condivisa
+from utils_openai import get_corrections_sync
 
-    # ── 1. Estrai il .docx ─────────────────────────────────────────────
+
+def correggi_footnotes_xml(docx_path: Path,
+                           client,
+                           glossary: set[str] | None = None) -> None:
+    """
+    Corregge le note a piè di pagina contenute in word/footnotes.xml
+    (refusi, ortografia, punteggiatura) preservando la formattazione
+    run-per-run del documento Word.
+    """
+    glossary = glossary or set()           # se None, usa set vuoto
+    tmp_dir = tempfile.mkdtemp(prefix="docx_", dir="/tmp")
+
+    # 1) Estrai il .docx in una cartella temporanea --------------------
     with zipfile.ZipFile(docx_path, "r") as zf:
         zf.extractall(tmp_dir)
 
     footnotes_file = os.path.join(tmp_dir, "word", "footnotes.xml")
     if not os.path.exists(footnotes_file):
         shutil.rmtree(tmp_dir)
-        return                                          # nessuna nota
+        return                              # documento senza note
 
-    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    ns   = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
     tree = etree.parse(footnotes_file)
 
-    # ── 2. Scorri ogni nota (escludi i separator) ──────────────────────
+    # 2) Scorri ogni <w:footnote> (escludendo i separator) -------------
     for foot in tree.xpath("//w:footnote[not(@w:type='separator')]", namespaces=ns):
-        txt_nodes = foot.xpath(".//w:t", namespaces=ns)
-        full_text = "".join(n.text or "" for n in txt_nodes)
+        txt_nodes  = foot.xpath(".//w:t", namespaces=ns)
+        full_text  = "".join(n.text or "" for n in txt_nodes)
 
         if not full_text.strip():
-            continue
+            continue                       # nota vuota → salta
 
-        # 2a. Chiamata GPT identica a quella dei paragrafi
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Sei un correttore di bozze italiano madrelingua "
-                    "dall'esperienza pluridecennale. Correggi solo errori "
-                    "ortografici e grammaticali. Restituisci solo il testo "
-                    "corretto, senza commenti."
-                ),
-            },
-            {"role": "user", "content": full_text},
-        ]
-        resp = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=0.7,
-            messages=messages,
+        # 2a) Chiamata OpenAI (una sola riga, via utility) -------------
+        corr = get_corrections_sync(
+            payload_json = json.dumps([{"id": 0, "txt": full_text}], ensure_ascii=False),
+            client       = client,
+            glossary     = glossary,
+            context      = "",
         )
-        corrected = resp.choices[0].message.content.strip()
+        corrected = corr[0]["txt"]
+
         if corrected == full_text:
-            continue                                  # nessuna correzione
+            continue                       # nessuna correzione
 
-        # ── 2b. Redistribuisci le parole corrette token-level ─────────
-        orig_tok = tokenize(full_text)
-        corr_tok = tokenize(corrected)
-        mapping  = align_tokens(orig_tok, corr_tok)
-
+        # 2b) Redistribuisci token corretti nei singoli <w:t> ----------
+        orig_tok   = tokenize(full_text)
+        corr_tok   = tokenize(corrected)
+        mapping    = align_tokens(orig_tok, corr_tok)
         starts_orig = token_starts(orig_tok)
 
-        # mappa “carattere originale → indice nodo <w:t>”
+        # mappa carattere→indice nodo
         char2node = []
         for idx, n in enumerate(txt_nodes):
             char2node.extend([idx] * len(n.text or ""))
 
         tok_per_node = defaultdict(list)
-
         for ref_idx, tok in mapping:
-            # se il token non deriva da nulla (insert/delete) scegli nodo vicino
             if ref_idx is None or ref_idx >= len(starts_orig):
                 node_idx = 0
             else:
@@ -126,38 +129,30 @@ def correggi_footnotes_xml(docx_path: Path, client) -> None:
                 node_idx = char2node[min(char_pos, len(char2node) - 1)]
             tok_per_node[node_idx].append(tok)
 
-        # scrivi il testo nei nodi senza spezzare parole
+        # scrivi il testo nei nodi preservando la partizione originale
         for idx, n in enumerate(txt_nodes):
             n.text = "".join(tok_per_node.get(idx, []))
 
-        # ── 2c. Ripristina il grassetto/italico del primo run se perso ─
-        first_with_txt = None
-        for n in txt_nodes:
-            if n.text and n.text.strip():
-                first_with_txt = n
-                break
-
+        # 2c) Se si perde la formattazione del primo run, ristabiliscila
+        first_with_txt = next((n for n in txt_nodes if n.text and n.text.strip()), None)
         if first_with_txt is not None:
-            run_first = first_with_txt.getparent()
-            has_rPr_first = run_first.find("./w:rPr", namespaces=ns)
-            has_bold_first = run_first.xpath("./w:rPr/w:b", namespaces=ns)
+            run_first       = first_with_txt.getparent()
+            has_rPr_first   = run_first.find("./w:rPr", namespaces=ns)
+            has_bold_first  = run_first.xpath("./w:rPr/w:b", namespaces=ns)
 
             if not has_bold_first:
-                # cerca un altro run con formattazione
                 for n2 in txt_nodes:
                     if n2 is first_with_txt or not (n2.text and n2.text.strip()):
                         continue
                     rPr_other = n2.getparent().find("./w:rPr", namespaces=ns)
                     if rPr_other is not None and list(rPr_other):
-                        # se il primo non ha <w:rPr>, crealo
                         if has_rPr_first is None:
                             has_rPr_first = etree.SubElement(run_first, qn("w:rPr"))
-                        # copia profonda di TUTTO il rPr (grassetto, italico, ecc.)
                         for child in rPr_other:
                             has_rPr_first.append(deepcopy(child))
-                        break  # basta una volta
+                        break   # una sola copia è sufficiente
 
-    # ── 3. Salva e ricompatta il .docx ─────────────────────────────────
+    # 3) Salva il nuovo footnotes.xml e ricompatta il .docx -------------
     tree.write(footnotes_file, xml_declaration=True, encoding="utf-8")
 
     tmp_docx = docx_path.with_suffix(".tmp")
@@ -165,10 +160,10 @@ def correggi_footnotes_xml(docx_path: Path, client) -> None:
         for root, _, files in os.walk(tmp_dir):
             for f in files:
                 fullpath = os.path.join(root, f)
-                arcname = os.path.relpath(fullpath, tmp_dir)
+                arcname  = os.path.relpath(fullpath, tmp_dir)
                 zf.write(fullpath, arcname)
 
-    shutil.move(tmp_docx, docx_path)
+    shutil.move(tmp_docx, docx_path)        # sovrascrive l’originale
     shutil.rmtree(tmp_dir)
     print("✏️  Note a piè di pagina corrette e formattazione preservata")
 
@@ -178,6 +173,9 @@ def tokenize(text: str) -> List[str]:
     lunghezza in token senza dipendenze esterne."""
     return WORD_RE.findall(text)
 
+def count_tokens(text: str) -> int:
+    """Conta i token reali secondo l’encoding del modello."""
+    return len(ENC.encode(text or ""))
 
 def token_starts(tokens: List[str]) -> List[int]:
     pos = 0
@@ -207,7 +205,7 @@ def chunk_paragraph_objects(
     current_tokens = 0
 
     for p in paragraphs:
-        para_tokens = len(tokenize(p.text))
+        para_tokens = count_tokens(p.text)
 
         if current and current_tokens + para_tokens > max_tokens:
             chunks.append(current)
@@ -265,73 +263,42 @@ def clone_run(src_run, paragraph):
     return new_run
 # ╰──────────────────────────────────────────────────────────────────────╯
 
-# ╭─────────────────────────── Map char→run ▾────────────────────────────╮
-def char_to_run_map(paragraph) -> List[int]:
-    mapping: List[int] = []
-    for idx, run in enumerate(paragraph.runs):
-        mapping.extend([idx] * len(run.text))
-    return mapping
-# ╰──────────────────────────────────────────────────────────────────────╯
-
-# ╭─────────────────────────── Correzione singolo paragrafo ▾────────────╮
-def correct_paragraph(
+# ─────────────────────────── NUOVO BLOCCO paragrafi multipli ──────────────────────────────
+def apply_correction_to_paragraph(
     p: Paragraph,
-    client: OpenAI,
+    corrected: str,
     mods: List[Modification],
     par_id: int,
-    prev_text: Optional[str] = None,
+    glossary: set[str],
 ):
+    """
+    Sovrascrive il paragrafo `p` con il testo già corretto
+    preservandone la formattazione run-per-run.
+    """
     original = p.text
-    if not original.strip():
-        return  # ignora paragrafi vuoti
-
-    # costruisci messaggi con contesto
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Sei un correttore di bozze italiano madrelingua professionista "
-                "dall'esperienza pluridecennale. Correggi solo errori ortografici "
-                "e grammaticali che trovi nel testo. Restituisci solo il testo "
-                "corretto. Evita prosa superflua e commenti. Evita la correzione "
-                "di nomi di persona non italiani o nomi fantasy."
-            ),
-        }
-    ]
-    if prev_text:
-        messages.append({
-            "role": "user",
-            "content": f"Paragrafo precedente (per contesto):\n{prev_text}"
-        })
-    messages.append({"role": "user", "content": original})
-
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0.7,
-        messages=messages,
-    )
-    corrected = resp.choices[0].message.content.strip()
     if corrected == original:
         return
 
-    # Salva la modifica per il report
-    mods.append(Modification(par_id=par_id, original=original, corrected=corrected))
+    mods.append(Modification(par_id, original, corrected))
 
-    # Ricostruzione runs mantenendo formattazione
-    orig_tokens = tokenize(original)
-    corr_tokens = tokenize(corrected)
-    mapping_tok = align_tokens(orig_tokens, corr_tokens)
-
-    starts_orig = token_starts(orig_tokens)
-    char_run = char_to_run_map(p)
+    # === ricostruzione dei run (stessa logica di prima) ===============
+    orig_tok  = tokenize(original)
+    corr_tok  = tokenize(corrected)
+    mapping   = align_tokens(orig_tok, corr_tok)
+    starts    = token_starts(orig_tok)
+    char_run  = char_to_run_map(p)
 
     tokens_per_run: Dict[int, List[str]] = defaultdict(list)
-    for ref_idx, tok in mapping_tok:
-        if ref_idx is None or ref_idx >= len(starts_orig):
-            run_idx = char_run[0] if char_run else 0
+    last_run_idx: Optional[int] = None
+    for ref_idx, tok in mapping:
+        if not char_run:
+            run_idx = 0
+        elif ref_idx is None:
+            run_idx = last_run_idx if last_run_idx is not None else char_run[0]
         else:
-            char_pos = starts_orig[ref_idx]
-            run_idx = char_run[char_pos]
+            pos     = starts[ref_idx]
+            run_idx = char_run[pos] if pos < len(char_run) else char_run[-1]
+        last_run_idx = run_idx
         tokens_per_run[run_idx].append(tok)
 
     old_runs = list(p.runs)
@@ -341,11 +308,121 @@ def correct_paragraph(
         toks = tokens_per_run.get(idx, [])
         if run.text:
             if not toks:
-                continue  # rimuove run residui
+                continue
             new_run = clone_run(run, p)
+            # 💥 work-around: se add_run ha restituito None rigenera il run
+            if new_run is None:
+                new_run = p.add_run("")
             new_run.text = "".join(toks)
         else:
-            p._p.append(deepcopy(run._r))  # footnote, commenti, ecc.
+            p._p.append(deepcopy(run._r))
+                # --- aggiorna dinamicamente il glossario -------------------------
+    for name in NAME_RE.findall(corrected):
+        glossary.add(name)
+
+
+# ╭─────────────────── Funzione generica di correzione ─────────────────╮
+async def correct_paragraph_group(
+    paragraphs:   list[Paragraph],
+    all_paras:    list[Paragraph],
+    start_par_id: int,
+    client:       AsyncOpenAI,
+    glossary:     set[str],
+    mods:         list[Modification],
+    context_size: int = 3,          # quanti paragrafi di contesto ricavare
+):
+    """
+    Corregge un gruppo di Paragraph mantenendo formattazione e glossario.
+
+    · paragraphs   : la “sezione” da correggere (chunk, note, header…)
+    · all_paras    : lista completa per calcolare il contesto
+    · start_par_id : id del primo paragrafo nel documento (1-based)
+    · client       : istanza AsyncOpenAI condivisa
+    · glossary     : set globale dei nomi canonici
+    · mods         : lista in cui accumulare le modifiche per il report
+    """
+
+    # 1.  CONTEXTO – ultimi `context_size` paragrafi prima di questo blocco
+    ctx_start = max(0, start_par_id - context_size - 1)
+    context = "\n".join(p.text for p in all_paras[ctx_start : start_par_id - 1])
+
+    # 2.  PAYLOAD JSON
+    payload = [{"id": i, "txt": p.text} for i, p in enumerate(paragraphs)]
+    payload_json = json.dumps(payload, ensure_ascii=False)
+
+    # 3.  MESSAGGI
+    messages = build_messages(context, payload_json, glossary)
+
+    # 4. CHIAMATA OpenAI (ora delegata alla utility)
+    corr_list = await get_corrections_async(
+        payload_json = payload_json,   # JSON già costruito al punto 2
+        client       = client,         # l’istanza AsyncOpenAI passata alla funzione
+        glossary     = glossary,       # il set di nomi canonici
+        context      = context,        # le righe di contesto calcolate al punto 1
+    )
+
+    # 5.  APPLICA LE CORREZIONI
+    corr_by_id = {d["id"]: d["txt"] for d in corr_list}
+
+    for local_id, p in enumerate(paragraphs):
+        apply_correction_to_paragraph(
+            p,
+            corr_by_id.get(local_id, p.text),
+            mods,
+            start_par_id + local_id,
+            glossary,                 # 👈 nuovo argomento
+        )
+    # 5-bis  verifica che il modello non abbia “accorciato” troppo
+    for local_id, p in enumerate(paragraphs):
+        orig_tok = tokenize(p.text)
+        corr_tok = tokenize(corr_by_id.get(local_id, p.text))
+
+        # se ha eliminato >2 % dei token, rigenera il chunk con GPT-4o «full»
+        if len(orig_tok) and (len(orig_tok) - len(corr_tok)) / len(orig_tok) > 0.02:
+            # puoi fare un retry con il modello maggiore o lanciare errore
+            raise RuntimeError(
+                f"Chunk {start_par_id+local_id}: eliminazione sospetta "
+                f"({len(orig_tok)-len(corr_tok)} token)."
+            )
+
+# ╰──────────────────────────────────────────────────────────────────────╯
+# ╭──────────────────── Wrapper: corpo principale ─────────────────────╮
+async def fix_body_chunks(
+    async_client: AsyncOpenAI,
+    all_paras:    list[Paragraph],
+    para_chunks:  list[list[Paragraph]],
+    start_id:     int,
+    mods:         list[Modification],
+    glossary:     set[str],
+):
+    """
+    Scorre tutti i chunk creati da `chunk_paragraph_objects` e li manda
+    in parallelo a `correct_paragraph_group`.
+    """
+    tasks = []
+    par_id = start_id
+    for chunk in para_chunks:
+        tasks.append(
+            correct_paragraph_group(
+                paragraphs   = chunk,
+                all_paras    = all_paras,
+                start_par_id = par_id,
+                client       = async_client,
+                glossary     = glossary,
+                mods         = mods,
+            )
+        )
+        par_id += len(chunk)
+
+    await asyncio.gather(*tasks)
+# ╰──────────────────────────────────────────────────────────────────────╯
+
+# ╭─────────────────────────── Map char→run ▾────────────────────────────╮
+def char_to_run_map(paragraph) -> List[int]:
+    mapping: List[int] = []
+    for idx, run in enumerate(paragraph.runs):
+        mapping.extend([idx] * len(run.text))
+    return mapping
 # ╰──────────────────────────────────────────────────────────────────────╯
 
 # ───────────────────────── traversal del documento ─────────────────────────────
@@ -392,131 +469,87 @@ def iter_all_paragraphs(doc: Document) -> Iterable[Paragraph]:
     yield from iter_footnote_paragraphs(doc)
     yield from iter_header_footer_paragraphs(doc)
     yield from iter_textbox_paragraphs(doc)
-# ────────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────
 
-# ╭─────────────────────────── Markdown report ▾─────────────────────────╮
-import re
-from difflib import SequenceMatcher
-
-# regex molto basilare per spezzare in frasi (., ?, !, … seguiti da spazio + maiuscola)
-_SENT_SPLIT_RE = re.compile(r"(?<=[\.\!\?…])\s+(?=[A-ZÀ-Ý])", re.U)
-
-def _split_sentences(text: str) -> List[str]:
-    """Suddivide un paragrafo in frasi usando una regex semplificata."""
-    return _SENT_SPLIT_RE.split(text.strip())
-
-def _token_diff_markdown(a: str, b: str) -> str:
-    """Restituisce un diff token-level in Markdown (~~del~~ / **ins**)."""
-    tok_a = tokenize(a)
-    tok_b = tokenize(b)
-    sm = SequenceMatcher(a=tok_a, b=tok_b, autojunk=False)
-
-    out: List[str] = []
-    for op, i1, i2, j1, j2 in sm.get_opcodes():
-        if op == "equal":
-            out.extend(tok_a[i1:i2])
-        elif op == "delete":
-            out.extend([f"~~{t}~~" for t in tok_a[i1:i2]])
-        elif op == "insert":
-            out.extend([f"**{t}**" for t in tok_b[j1:j2]])
-        elif op == "replace":
-            out.extend([f"~~{t}~~" for t in tok_a[i1:i2]])
-            out.extend([f"**{t}**" for t in tok_b[j1:j2]])
-    return "".join(out)
-
-def write_markdown_report(mods: List[Modification], dst_doc: Path):
-    """Crea un report Markdown limitato **solo alle frasi modificate**."""
-    md_path = dst_doc.with_name(dst_doc.stem + "_diff.md")
-
-    paragraphs_changed = len(mods)
-    deleted_tokens = 0
-    inserted_tokens = 0
-    lines: List[str] = []
-
-    # Header
-    lines.append(f"# Report correzioni – {dst_doc.name}")
-    lines.append(f"_Generato: {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n")
-
-    # Corpo
-    for m in mods:
-        orig_sent = _split_sentences(m.original)
-        corr_sent = _split_sentences(m.corrected)
-
-        sm_sent = SequenceMatcher(a=orig_sent, b=corr_sent, autojunk=False)
-
-        for op, i1, i2, j1, j2 in sm_sent.get_opcodes():
-            if op == "equal":
-                continue  # frasi identiche → salta
-
-            orig_block = " ".join(orig_sent[i1:i2]).strip()
-            corr_block = " ".join(corr_sent[j1:j2]).strip()
-
-            orig_tok = tokenize(orig_block)
-            corr_tok = tokenize(corr_block)
-            deleted_tokens += max(0, len(orig_tok) - len(corr_tok))
-            inserted_tokens += max(0, len(corr_tok) - len(orig_tok))
-
-            diff_md = _token_diff_markdown(orig_block, corr_block)
-
-            lines.extend([
-                "---",
-                f"### Paragrafo {m.par_id}",
-                diff_md,
-                "",
-            ])
-
-    # Statistiche
-    stats_block = [
-        "## Statistiche",
-        f"* Paragrafi corretti: {paragraphs_changed}",
-        f"* Token eliminati (approssimativi): {deleted_tokens}",
-        f"* Token inseriti (approssimativi): {inserted_tokens}",
-        "",
-        "---",
-        "",
-    ]
-    lines[2:2] = stats_block  # inserisce subito dopo header
-
-    md_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"📄  Report modifiche salvato: {md_path.name}")
-# ╰──────────────────────────────────────────────────────────────────────╯
-
-# ───────────────────────── entry-point con logging dei chunk ───────────────────
+# ───────────────────────── entry-point con logging ────────────────────
 def process_doc(inp: Path, out: Path):
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    """Versione *sincrona* per la CLI; delega alla async con asyncio.run."""
+    asyncio.run(process_doc_async(inp, out))
+    
+async def process_doc_async(inp: Path, out: Path):
+    """Identica a process_doc ma *senza* asyncio.run: la useremo da FastAPI."""
     doc = Document(inp)
 
-    all_paras: List[Paragraph] = list(iter_all_paragraphs(doc))
-    para_chunks = chunk_paragraph_objects(all_paras)
+    # Tutti i paragrafi
+    all_paras = list(iter_all_paragraphs(doc))
 
-    mods: List[Modification] = []
-    par_counter = 0
+    # Glossario iniziale
+    global GLOSSARY
+    name_counts = collections.Counter(
+        n for p in all_paras for n in NAME_RE.findall(p.text)
+    )
+    GLOSSARY = {w for w, c in name_counts.items() if c >= 2}
 
-    total_chunks = len(para_chunks)
-    print(
-        f"🔍  Rilevati {total_chunks} chunk "
-        f"(limite {MAX_TOKENS_GPT4O_MINI} token)."
+    # Chunk
+    para_chunks = chunk_paragraph_objects(all_paras, max_tokens=300)
+    print(f"🔍  Rilevati {len(para_chunks)} chunk (limite {MAX_TOKENS_GPT4O_MINI} token).")
+
+    mods: list[Modification] = []
+
+    # --- corpo documento (async) ---------------------------------------
+    async_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    await fix_body_chunks(
+        async_client, all_paras, para_chunks, 1, mods, GLOSSARY
     )
 
-    for chunk_idx, chunk in enumerate(para_chunks, 1):
-        print(
-            f"⚙️  Elaborazione chunk {chunk_idx}/{total_chunks} "
-            f"({len(chunk)} paragrafi)…"
-        )
-        prev = None
-        for p in chunk:
-            par_counter += 1
-            correct_paragraph(p, client, mods, par_counter, prev)
-            prev = p.text
-        print(f"✅  Completato chunk {chunk_idx}/{total_chunks}")
+    # --- salvataggi sincroni ------------------------------------------
+    doc.save(out)
+    client_sync = OpenAI(api_key=OPENAI_API_KEY)
+    correggi_footnotes_xml(out, client_sync)
+    write_markdown_report(mods, out)
+    write_glossary_report(GLOSSARY, all_paras, out)
 
+# ───────────────────────────────────────────────────────────────────────
+
+# ╭────────────────────────── Prompt & builder messaggi ─────────────────────────╮
+SYSTEM_MSG_BASE = """
+Sei un correttore di bozze madrelingua italiano con decenni di esperienza.
+
+• Correggi **solo** refusi, errori ortografici / grammaticali e punteggiatura.  
+• Non eliminare, spostare o accorciare parole, frasi o capoversi.  
+• Non riformulare lo stile; se una parte è già corretta, lasciala invariata.
+
+NOMI / TERMINI FANTASY ↓  
+Se trovi varianti ortografiche dei nomi presenti nell’elenco seguente,
+uniforma la grafia a quella esatta dell’elenco.
+
+OUTPUT: restituisci **SOLO JSON** con la chiave `'corr'`
+( lista di {id:int, txt:str} ) — niente testo extra.
+"""
+
+def build_messages(context: str, payload_json: str, glossary: set[str]) -> list[dict]:
+    """
+    Crea i tre messaggi da mandare a OpenAI:
+        1. system    → vincoli + lista dei nomi “canonici”
+        2. assistant → contesto di righe precedenti (NON va modificato)
+        3. user      → JSON dei paragrafi da correggere
+    """
+    system_msg = SYSTEM_MSG_BASE + "\nLista: " + ", ".join(sorted(glossary))
+
+    return [
+        {"role": "system",    "content": system_msg},
+        {"role": "assistant", "content": "Contesto (NON modificare):\n" + context},
+        {"role": "user",      "content": payload_json},
+    ]
+# ╰──────────────────────────────────────────────────────────────────────────────╯
+
+    # salva il .docx con le correzioni
     doc.save(out)
     print(f"💾  Documento salvato: {out.name}")
 
-    correggi_footnotes_xml(out, client)
-
-
-    # Genera report Markdown
+    # footnote e report restano sincroni
+    client_sync = OpenAI(api_key=OPENAI_API_KEY)
+    correggi_footnotes_xml(out, client_sync)
     write_markdown_report(mods, out)
 
 def find_latest_docx(folder: Path) -> Path:
@@ -524,6 +557,36 @@ def find_latest_docx(folder: Path) -> Path:
     if not files:
         raise RuntimeError("Nessun .docx trovato nella cartella")
     return max(files, key=lambda p: p.stat().st_mtime)
+
+# ------------------------------------------------------------------ #
+#  API pubblica per FastAPI
+from pathlib import Path
+import zipfile
+
+async def run_proofread(src: Path) -> Path:
+    """
+    Corregge <src>.docx e restituisce il path di uno ZIP che contiene:
+      • <nome>_corretto.docx
+      • <nome>_diff.md
+      • <nome>_glossario.md
+    """
+    if not src.exists():
+        raise FileNotFoundError(src)
+
+    dst = src.with_stem(src.stem + "_corretto")
+    await process_doc_async(src, dst)                      # funzione già presente
+
+    zip_path = dst.with_suffix(".zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in (
+            dst,
+            dst.with_name(dst.stem + "_diff.md"),
+            dst.with_name(dst.stem + "_glossario.md"),
+        ):
+            if f.exists():
+                zf.write(f, arcname=f.name)
+    return zip_path
+# ------------------------------------------------------------------ #
 
 if __name__ == "__main__":
     # marca inizio
@@ -538,21 +601,3 @@ if __name__ == "__main__":
     # tempo impiegato
     elapsed = time.perf_counter() - start_time
     print(f"✨  Fatto in {elapsed:.2f} secondi!")
-
-def run_proofread(src_path: Path) -> Path:
-    """
-    Wrapper usato dall'API: prende un .docx,
-    restituisce Path del .zip con docx corretto + md.
-    """
-    dst = src_path.with_stem(src_path.stem + "_corretto")
-    process_doc(src_path, dst)
-
-    # impacchetta risultato + report
-    zip_path = dst.with_suffix(".zip")
-    import zipfile
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.write(dst, dst.name)
-        zf.write(dst.with_name(dst.stem + "_diff.md"),
-                 dst.stem + "_diff.md")
-
-    return zip_path

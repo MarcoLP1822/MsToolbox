@@ -16,5 +16,5 @@ async def proofread(docx: UploadFile = File(...)):
         tmp.write(data)
         tmp_path = tmp.name
 
-    zip_path = run_proofread(Path(tmp_path))
+    zip_path = await run_proofread(Path(tmp_path))
     return FileResponse(zip_path, filename="corretto.zip")
