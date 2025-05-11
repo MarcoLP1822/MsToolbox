@@ -8,14 +8,12 @@ Genera i due report Markdown:
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
-import collections, re
+import collections
+import re
 from typing import List
 
 # ── dipendenze locali da main.py -------------------------------------
-from token_utils import tokenize, token_starts           # se li hai separati
-# oppure, se non hai ancora estratto token_utils:
-# from main import tokenize, token_starts
-
+from common.tokenizer import tokenize 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 

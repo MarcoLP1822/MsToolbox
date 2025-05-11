@@ -17,19 +17,19 @@ import re
 import time
 import json
 import shutil
+import collections
 import asyncio
 import zipfile
 import tiktoken
-import collections
-import tempfile, uuid
+import tempfile
+from collections import defaultdict
+from common import tokenize, WORD_RE
 from pathlib import Path
-from copy import deepcopy
+from dotenv import load_dotenv
 from docx import Document
 from docx.oxml.ns import qn
-from datetime import datetime
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from collections import defaultdict
 from docx.text.paragraph import Paragraph
 from openai import OpenAI
 from openai import AsyncOpenAI
@@ -39,6 +39,7 @@ from utils_openai import _OPENAI_MODEL as OPENAI_MODEL
 from utils_openai import get_corrections_async, get_corrections_sync
 
 # ───────────────────────── CONFIGURAZIONE ────────────────────────────
+load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("API key di OpenAI non trovata. Imposta OPENAI_API_KEY nel tuo ambiente.")
@@ -52,20 +53,14 @@ except KeyError:
     ENC = tiktoken.get_encoding("cl100k_base")
 # ─────────────────────────────────────────────────────────────────────
 
-WORD_RE = re.compile(r"\w+|\W+")
-# 👇 NUOVO: riconosce parole in PascalCase o TUTTO MAIUSCOLO ≥ 3 lettere
 NAME_RE = re.compile(r"\b(?:[A-Z][a-z]{2,}|[A-Z]{2,})\w*\b")
 
 # ╭─────────────────────────── Note a piè di pagina ▾──────────────────────────╮
-from pathlib import Path
-from collections import defaultdict
 from copy import deepcopy
-import json, os, shutil, zipfile
+import os
 from lxml import etree
-from docx.oxml.ns import qn
 
 # nuova importazione della utility condivisa
-from utils_openai import get_corrections_sync
 
 
 def correggi_footnotes_xml(docx_path: Path,
@@ -77,7 +72,7 @@ def correggi_footnotes_xml(docx_path: Path,
     run-per-run del documento Word.
     """
     glossary = glossary or set()           # se None, usa set vuoto
-    tmp_dir = tempfile.mkdtemp(prefix="docx_", dir="/tmp")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="docx_", dir=tempfile.gettempdir()))
 
     # 1) Estrai il .docx in una cartella temporanea --------------------
     with zipfile.ZipFile(docx_path, "r") as zf:
@@ -562,8 +557,6 @@ def find_latest_docx(folder: Path) -> Path:
 
 # ------------------------------------------------------------------ #
 #  API pubblica per FastAPI
-from pathlib import Path
-import zipfile
 
 async def run_proofread(src: Path) -> Path:
     """

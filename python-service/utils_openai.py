@@ -1,7 +1,11 @@
 # utils_openai.py
-import asyncio, json, re, time
+import asyncio
+import json
+import re
+import time
 from typing import List, Dict, Set
 from openai import AsyncOpenAI, OpenAI
+from common.prompt import build_messages
 
 _OPENAI_MODEL  = "gpt-4o-mini"
 _RETRY_BACKOFF = (1, 2, 4)  # secondi in caso di risposta non valida
@@ -16,32 +20,6 @@ def _parse_corr(raw: str) -> List[Dict]:
         raise ValueError("JSON senza chiave 'corr'")
     return data["corr"]
 
-# ------------------------------------------------------------------ #
-#  Costruiamo i messaggi (lo stesso identico schema che usavi prima)
-SYSTEM_MSG_BASE = """
-Sei un correttore di bozze madrelingua italiano con decenni di esperienza.
-
-• Correggi **solo** refusi, errori ortografici / grammaticali e punteggiatura.  
-• Non eliminare, spostare o accorciare parole, frasi o capoversi.  
-• Non riformulare lo stile; se una parte è già corretta, lasciala invariata.
-
-NOMI / TERMINI FANTASY ↓  
-Se trovi varianti ortografiche dei nomi presenti nell’elenco seguente,
-uniforma la grafia a quella esatta dell’elenco.
-
-OUTPUT: restituisci **SOLO JSON** con la chiave `'corr'`
-( lista di {id:int, txt:str} ) — niente testo extra.
-"""
-
-def build_messages(context: str,
-                   payload_json: str,
-                   glossary: Set[str]) -> List[Dict]:
-    system_msg = SYSTEM_MSG_BASE + "\\nLista: " + ", ".join(sorted(glossary))
-    return [
-        {"role": "system",    "content": system_msg},
-        {"role": "assistant", "content": "Contesto (NON modificare):\\n" + context},
-        {"role": "user",      "content": payload_json},
-    ]
 # ------------------------------------------------------------------ #
 
 async def _chat_async(messages, client):
