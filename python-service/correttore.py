@@ -35,16 +35,12 @@ from openai import OpenAI
 from openai import AsyncOpenAI
 from typing import Dict, Iterable, List, Optional, Tuple
 from reports import write_markdown_report, write_glossary_report
-from utils_openai import _OPENAI_MODEL as OPENAI_MODEL
-from utils_openai import get_corrections_async, get_corrections_sync
+from common.utils_openai import get_corrections_async, get_corrections_sync
+from common.config import OPENAI_MODEL, MAX_TOKENS_MODEL, OPENAI_API_KEY
 
 # ───────────────────────── CONFIGURAZIONE ────────────────────────────
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("API key di OpenAI non trovata. Imposta OPENAI_API_KEY nel tuo ambiente.")
-# Lunghezza massima di contesto (in token) accettata in un singolo prompt
-MAX_TOKENS_GPT4O_MINI = 10000
 
 try:
     ENC = tiktoken.encoding_for_model(OPENAI_MODEL)
@@ -194,7 +190,7 @@ class Modification:
 # ╭─────────────────────────── Chunking ▾────────────────────────────────╮
 def chunk_paragraph_objects(
     paragraphs: List[Paragraph],
-    max_tokens: int = MAX_TOKENS_GPT4O_MINI,
+    max_tokens: int = MAX_TOKENS_MODEL,
 ) -> List[List[Paragraph]]:
     """Dividi la lista di oggetti Paragraph in blocchi < max_tokens."""
     chunks: List[List[Paragraph]] = []
@@ -489,7 +485,7 @@ async def process_doc_async(inp: Path, out: Path):
 
     # Chunk
     para_chunks = chunk_paragraph_objects(all_paras, max_tokens=300)
-    print(f"🔍  Rilevati {len(para_chunks)} chunk (limite {MAX_TOKENS_GPT4O_MINI} token).")
+    print(f"🔍  Rilevati {len(para_chunks)} chunk (limite {MAX_TOKENS_MODEL} token).")
 
     mods: list[Modification] = []
 

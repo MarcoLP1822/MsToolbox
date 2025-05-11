@@ -6,9 +6,9 @@ import time
 from typing import List, Dict, Set
 from openai import AsyncOpenAI, OpenAI
 from common.prompt import build_messages
+from common.config import OPENAI_MODEL, RETRY_BACKOFF
 
-_OPENAI_MODEL  = "gpt-4o-mini"
-_RETRY_BACKOFF = (1, 2, 4)  # secondi in caso di risposta non valida
+
 _FENCE_RE      = re.compile(r"^```[\w]*\n?|```$", re.S)
 
 def _strip_fences(text: str) -> str:
@@ -23,9 +23,9 @@ def _parse_corr(raw: str) -> List[Dict]:
 # ------------------------------------------------------------------ #
 
 async def _chat_async(messages, client):
-    for delay in _RETRY_BACKOFF:
+    for delay in RETRY_BACKOFF:
         resp = await client.chat.completions.create(
-            model=_OPENAI_MODEL,
+            model=OPENAI_MODEL,
             temperature=0.3,
             response_format={"type": "json_object"},
             messages=messages,
@@ -37,9 +37,9 @@ async def _chat_async(messages, client):
     raise RuntimeError("Risposta non-JSON dopo 3 tentativi")
 
 def _chat_sync(messages, client):
-    for delay in _RETRY_BACKOFF:
+    for delay in RETRY_BACKOFF:
         resp = client.chat.completions.create(
-            model=_OPENAI_MODEL,
+            model=OPENAI_MODEL,
             temperature=0.3,
             response_format={"type": "json_object"},
             messages=messages,
