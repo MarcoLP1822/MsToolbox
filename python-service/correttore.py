@@ -39,7 +39,9 @@ from utils_openai import _OPENAI_MODEL as OPENAI_MODEL
 from utils_openai import get_corrections_async, get_corrections_sync
 
 # ───────────────────────── CONFIGURAZIONE ────────────────────────────
-OPENAI_API_KEY = "***REMOVED***"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError("API key di OpenAI non trovata. Imposta OPENAI_API_KEY nel tuo ambiente.")
 # Lunghezza massima di contesto (in token) accettata in un singolo prompt
 MAX_TOKENS_GPT4O_MINI = 10000
 
