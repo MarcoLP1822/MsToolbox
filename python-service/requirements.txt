@@ -5,3 +5,4 @@ lxml
 openai>=1.14
 python-multipart
 tiktoken
+aiofiles
