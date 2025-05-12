@@ -1,0 +1,12 @@
+# evita di copiare roba inutile nel contesto di build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+.env*
+.vscode/
+.idea/
+.git/
+tests/
+README.md

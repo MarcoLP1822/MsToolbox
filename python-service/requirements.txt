@@ -6,3 +6,4 @@ openai>=1.14
 python-multipart
 tiktoken
 aiofiles
+python-dotenv>=1.0
